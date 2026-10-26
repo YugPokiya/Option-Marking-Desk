@@ -1,0 +1,71 @@
+# Canary of the marking engine. Same Service (omd-api), different 'version' label.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omd-api-v2
+  labels: {app: omd-api, version: v2}
+spec:
+  replicas: 1                     # canary stays small; v1 keeps the HPA
+  revisionHistoryLimit: 5
+  strategy:
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels: {app: omd-api, version: v2}
+  template:
+    metadata:
+      labels: {app: omd-api, version: v2}   # "version" is what DestinationRule subsets key on
+      annotations:
+        prometheus.io/scrape: "true"        # Istio merges app + Envoy metrics on :15020
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: omd-api
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: omd-api}
+      containers:
+        - name: api
+          image: omd-api-canary          # set by the component's images: block
+          ports:
+            - {name: http, containerPort: 8000}
+          envFrom:
+            - configMapRef: {name: omd-config}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: omd-secrets, key: DATABASE_URL}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 24       # up to 2 min to load models / warm caches
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}   # should check DB + Redis
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}  # process only, never dependencies
+            periodSeconds: 20
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec: {command: ["sleep", "5"]}          # let Envoy/endpoints drain before SIGTERM
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}       # smile fitting is numpy/scipy heavy
+            limits: {memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}

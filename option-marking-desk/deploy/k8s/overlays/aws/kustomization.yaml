@@ -1,0 +1,23 @@
+# EKS overlay. Postgres runs in-cluster on an encrypted gp3 volume.
+# (For production, move it to RDS: copy overlays/prod's postgres deletes + a ServiceEntry on port 5432.)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: omd
+resources:
+  - ../../base
+images:   # scripts/aws-up.sh rewrites the account id
+  - {name: registry.digitalocean.com/omd/omd-api, newName: 000000000000.dkr.ecr.ap-south-1.amazonaws.com/omd-api, newTag: 0.1.0}
+  - {name: registry.digitalocean.com/omd/omd-web, newName: 000000000000.dkr.ecr.ap-south-1.amazonaws.com/omd-web, newTag: 0.1.0}
+generatorOptions:
+  disableNameSuffixHash: true
+secretGenerator:
+  - name: omd-secrets
+    envs: [secrets.env]
+configMapGenerator:
+  - name: omd-config
+    behavior: merge
+    literals: [APP_ENV=prod, LOG_LEVEL=info, UVICORN_WORKERS=2]
+patches:
+  - target: {kind: StatefulSet, name: postgres}
+    patch: |-
+      - {op: add, path: /spec/volumeClaimTemplates/0/spec/storageClassName, value: gp3}

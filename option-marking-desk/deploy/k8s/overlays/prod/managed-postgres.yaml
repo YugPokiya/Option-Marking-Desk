@@ -1,0 +1,12 @@
+# Mesh egress is REGISTRY_ONLY, so the external database must be declared.
+# Replace the host with your cluster's hostname from the DO console (port 25060, TLS).
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: do-managed-postgres
+spec:
+  hosts: ["omd-db-do-user-0000000-0.k.db.ondigitalocean.com"]
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+    - {number: 25060, name: tcp-postgres, protocol: TCP}   # Postgres negotiates TLS in-protocol, so not "TLS"

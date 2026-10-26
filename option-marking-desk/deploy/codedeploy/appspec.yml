@@ -1,0 +1,25 @@
+# CodeDeploy (EC2) revision for the Option Marking Desk.
+# The bundle = this folder + release.env (written by CI: image tag, registry, region, config path).
+version: 0.0
+os: linux
+files:
+  - source: /
+    destination: /opt/omd/current
+file_exists_behavior: OVERWRITE
+hooks:
+  ApplicationStop:              # runs the PREVIOUS revision's script (skipped on first deploy)
+    - location: scripts/stop.sh
+      timeout: 120
+      runas: root
+  AfterInstall:                 # render .env from SSM + Secrets Manager, pull images
+    - location: scripts/configure.sh
+      timeout: 600
+      runas: root
+  ApplicationStart:             # migrate, then start containers
+    - location: scripts/start.sh
+      timeout: 600
+      runas: root
+  ValidateService:              # must pass before the instance rejoins the load balancer
+    - location: scripts/validate.sh
+      timeout: 180
+      runas: root

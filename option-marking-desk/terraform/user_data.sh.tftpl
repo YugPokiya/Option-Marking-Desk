@@ -1,0 +1,33 @@
+#!/bin/bash
+# First boot of an app instance: Docker + Compose, swap, CodeDeploy agent.
+# The app itself arrives via CodeDeploy (deploy/codedeploy), not here.
+set -euxo pipefail
+
+dnf -y install docker ruby wget
+systemctl enable --now docker
+
+# Docker Compose plugin
+mkdir -p /usr/libexec/docker/cli-plugins
+curl -fsSL "https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-linux-x86_64" \
+  -o /usr/libexec/docker/cli-plugins/docker-compose
+chmod +x /usr/libexec/docker/cli-plugins/docker-compose
+docker compose version
+
+# t3.micro has 1 GiB RAM: 1 GiB swap keeps image pulls and migrations from OOM-killing the API
+if [ ! -f /swapfile ]; then
+  fallocate -l 1G /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+# CodeDeploy agent (from the regional AWS bucket)
+cd /tmp
+wget -q "https://aws-codedeploy-${region}.s3.${region}.amazonaws.com/latest/install"
+chmod +x ./install
+./install auto
+systemctl enable --now codedeploy-agent
+
+mkdir -p /opt/omd
+chmod 700 /opt/omd

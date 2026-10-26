@@ -1,0 +1,6 @@
+# Used only by scripts/validate.sh so offline `istioctl analyze` sees the mesh settings.
+defaultConfig:
+  proxyMetadata:
+    ISTIO_META_DNS_CAPTURE: "true"
+outboundTrafficPolicy:
+  mode: REGISTRY_ONLY

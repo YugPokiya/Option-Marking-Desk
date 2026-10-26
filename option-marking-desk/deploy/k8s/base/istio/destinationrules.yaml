@@ -1,0 +1,31 @@
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: omd-api
+spec:
+  host: omd-api
+  trafficPolicy:
+    connectionPool:
+      tcp: {maxConnections: 100}
+      http:
+        http1MaxPendingRequests: 50
+        maxRequestsPerConnection: 0
+    outlierDetection:              # eject a pod that keeps returning 5xx
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 60s
+      maxEjectionPercent: 50
+  subsets:
+    - name: v1
+      labels: {version: v1}
+    - name: v2                     # used by the canary component
+      labels: {version: v2}
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: omd-web
+spec:
+  host: omd-web
+  trafficPolicy:
+    loadBalancer: {simple: LEAST_REQUEST}

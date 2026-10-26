@@ -1,0 +1,18 @@
+# Adds omd-api v2 next to v1 and splits /api traffic 90/10.
+# Shift further with:  scripts/canary.sh 50   (then 100), and finally promote v2's image into v1.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - api-v2.yaml
+images:
+  - {name: omd-api-canary, newName: registry.digitalocean.com/omd/omd-api, newTag: 0.2.0}
+patches:
+  - target: {kind: VirtualService, name: omd}
+    patch: |-
+      - op: replace
+        path: /spec/http/0/route
+        value:
+          - destination: {host: omd-api, subset: v1, port: {number: 80}}
+            weight: 90
+          - destination: {host: omd-api, subset: v2, port: {number: 80}}
+            weight: 10

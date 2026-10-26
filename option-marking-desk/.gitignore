@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage*.xml
+junit*.xml
+htmlcov/
+.env
+# Node
+web/node_modules/
+web/dist/
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate*
+terraform/terraform.tfvars
+# Deploy secrets
+deploy/k8s/overlays/*/secrets.env
+deploy/codedeploy/release.env
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

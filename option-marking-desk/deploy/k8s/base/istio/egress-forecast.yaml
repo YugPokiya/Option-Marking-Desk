@@ -1,0 +1,22 @@
+# Mesh egress is REGISTRY_ONLY: declare what the forecast job calls.
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: nse-archives
+spec:
+  hosts: ["nsearchives.nseindia.com", "www.nseindia.com"]
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+    - {number: 443, name: tls, protocol: TLS}
+---
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: aws-bedrock
+spec:
+  hosts: ["bedrock-runtime.ap-south-1.amazonaws.com", "sts.ap-south-1.amazonaws.com"]
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+    - {number: 443, name: tls, protocol: TLS}

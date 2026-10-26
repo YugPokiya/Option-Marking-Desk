@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: omd
+  labels:
+    istio-injection: enabled   # every pod in this namespace gets an Envoy sidecar

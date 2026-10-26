@@ -1,0 +1,57 @@
+# What the GitHub Actions role may do in the cluster (mapped via an EKS access entry to the
+# Kubernetes group "omd-deployers" by deploy/aws/github-oidc.sh). Nothing outside namespace omd
+# except creating/patching that namespace itself.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: omd-deployer-namespace}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [omd]
+    verbs: [get, patch, update]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [create, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: omd-deployer-namespace}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: omd-deployer-namespace}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: Group, name: omd-deployers}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: omd-deployer, namespace: omd}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps, secrets, services, serviceaccounts, persistentvolumeclaims]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods, pods/log, events]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, replicasets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [networking.istio.io]
+    resources: [gateways, virtualservices, destinationrules, sidecars, serviceentries]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [security.istio.io]
+    resources: [peerauthentications, authorizationpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: omd-deployer, namespace: omd}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: omd-deployer}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: Group, name: omd-deployers}

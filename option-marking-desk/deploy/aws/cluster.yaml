@@ -1,0 +1,59 @@
+# eksctl create cluster -f aws/cluster.yaml      (~15-20 min)
+# EKS 1.36: in standard support until Aug 2027, supported by Istio 1.31 (K8s 1.32-1.37).
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: omd
+  region: ap-south-1              # Mumbai
+  version: "1.36"
+  tags: {project: option-marking-desk}
+
+iam:
+  withOIDC: true
+  podIdentityAssociations:
+    # cert-manager proves domain ownership by writing a TXT record in Route 53 (DNS-01).
+    - namespace: cert-manager
+      serviceAccountName: cert-manager
+      permissionPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: ["route53:GetChange"]
+            Resource: "arn:aws:route53:::change/*"
+          - Effect: Allow
+            Action: ["route53:ChangeResourceRecordSets", "route53:ListResourceRecordSets"]
+            Resource: "arn:aws:route53:::hostedzone/*"
+          - Effect: Allow
+            Action: ["route53:ListHostedZonesByName"]
+            Resource: "*"
+
+    # daily forecast job: Claude review on Bedrock
+    - namespace: omd
+      serviceAccountName: omd-forecast
+      permissionPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: ["bedrock:InvokeModel"]
+            Resource:
+              - "arn:aws:bedrock:ap-south-1:*:inference-profile/in.anthropic.claude-sonnet-5"
+              - "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-5*"
+
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy
+  - name: eks-pod-identity-agent
+  - name: aws-ebs-csi-driver       # needed for the Postgres PersistentVolume
+    useDefaultPodIdentityAssociations: true
+
+managedNodeGroups:
+  - name: ng-general
+    instanceType: m6i.large        # 2 vCPU / 8 GiB: room for app + Envoy sidecars
+    minSize: 2
+    desiredCapacity: 3
+    maxSize: 5
+    volumeSize: 40
+    volumeType: gp3
+    privateNetworking: true        # nodes in private subnets; only the NLB is public
+    labels: {role: general}

@@ -1,0 +1,12 @@
+[Unit]
+Description=Option Marking Desk: daily IV forecast (bhavcopy -> model -> Claude review)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Every instance runs this; a Postgres advisory lock lets exactly one do the work.
+ExecStart=/usr/bin/docker compose -f /opt/omd/current/docker-compose.yml --env-file /opt/omd/.env --profile jobs run --rm forecast
+TimeoutStartSec=1800
+# exit code 2 = forecast computed but blocked by review: not a service failure
+SuccessExitStatus=2

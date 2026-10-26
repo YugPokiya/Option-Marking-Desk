@@ -1,0 +1,11 @@
+# Limit what each Envoy in this namespace knows about (smaller config, less memory),
+# and only allow egress to hosts declared in this namespace or istio-system.
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: default
+spec:
+  egress:
+    - hosts:
+        - "./*"
+        - "istio-system/*"

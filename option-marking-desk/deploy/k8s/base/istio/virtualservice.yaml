@@ -1,0 +1,37 @@
+# L7 routing: /api -> marking engine (prefix stripped), everything else -> frontend.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: omd
+spec:
+  hosts: ["omd.example.com"]
+  gateways: ["omd-gateway"]
+  http:
+    - name: api
+      match:
+        - uri: {prefix: /api/}
+        - uri: {exact: /api}
+      rewrite:
+        uri: /                     # /api/marks -> /marks ; FastAPI(root_path="/api") keeps /api/docs links right
+      route:
+        - destination:
+            host: omd-api
+            subset: v1
+            port: {number: 80}
+          weight: 100
+      timeout: 30s                 # a large smile refit should finish well inside this
+      retries:
+        attempts: 2
+        perTryTimeout: 15s
+        retryOn: connect-failure,refused-stream,unavailable   # safe for non-idempotent POSTs
+      corsPolicy:
+        allowOrigins:
+          - exact: https://omd.example.com
+        allowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+        allowHeaders: [authorization, content-type]
+        maxAge: 24h
+    - name: web
+      route:
+        - destination:
+            host: omd-web
+            port: {number: 80}

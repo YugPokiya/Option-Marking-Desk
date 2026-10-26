@@ -1,0 +1,41 @@
+# Run per release, before rolling the API:   kubectl create -f k8s/jobs/migrate.yaml
+# generateName => a fresh Job each time (Jobs are immutable). Native sidecars let it exit cleanly.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: omd-migrate-
+  namespace: omd
+  labels: {app: omd-migrate}
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels: {app: omd-migrate}
+    spec:
+      serviceAccountName: omd-migrate
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: migrate
+          image: registry.digitalocean.com/omd/omd-api:0.1.0   # same image as the API
+          command: ["alembic", "upgrade", "head"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: omd-secrets, key: DATABASE_URL}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}

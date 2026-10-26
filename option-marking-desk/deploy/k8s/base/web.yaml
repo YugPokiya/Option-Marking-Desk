@@ -1,0 +1,65 @@
+# Static frontend (Vite build) served by unprivileged nginx.
+apiVersion: v1
+kind: Service
+metadata:
+  name: omd-web
+  labels: {app: omd-web}
+spec:
+  selector: {app: omd-web}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      appProtocol: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omd-web
+  labels: {app: omd-web, version: v1}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels: {app: omd-web, version: v1}
+  template:
+    metadata:
+      labels: {app: omd-web, version: v1}
+    spec:
+      serviceAccountName: omd-web
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: web
+          image: registry.digitalocean.com/omd/omd-web:0.1.0
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: omd-web
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app: omd-web}

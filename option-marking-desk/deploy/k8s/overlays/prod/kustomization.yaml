@@ -1,0 +1,45 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: omd
+resources:
+  - ../../base
+  - managed-postgres.yaml
+# Uncomment to send 10% of /api traffic to omd-api v2:
+# components:
+#   - ../../components/canary
+images:
+  - {name: registry.digitalocean.com/omd/omd-api, newTag: 0.1.0}
+  - {name: registry.digitalocean.com/omd/omd-web, newTag: 0.1.0}
+generatorOptions:
+  disableNameSuffixHash: true
+secretGenerator:
+  - name: omd-secrets
+    envs: [secrets.env]
+configMapGenerator:
+  - name: omd-config
+    behavior: merge
+    literals: [APP_ENV=prod, LOG_LEVEL=info, UVICORN_WORKERS=2]
+patches:
+  # Prod uses DigitalOcean Managed Postgres (backups, failover), so drop the in-cluster one.
+  - target: {kind: StatefulSet, name: postgres}
+    patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata: {name: postgres}
+  - target: {kind: Service, name: postgres}
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata: {name: postgres}
+  - target: {kind: AuthorizationPolicy, name: allow-to-postgres}
+    patch: |-
+      $patch: delete
+      apiVersion: security.istio.io/v1
+      kind: AuthorizationPolicy
+      metadata: {name: allow-to-postgres}
+  - target: {kind: HorizontalPodAutoscaler, name: omd-api}
+    patch: |-
+      - {op: replace, path: /spec/minReplicas, value: 3}
+      - {op: replace, path: /spec/maxReplicas, value: 8}

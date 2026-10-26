@@ -1,0 +1,75 @@
+# Zero trust inside the namespace: deny everything, then allow each hop by identity.
+#   ingressgateway -> omd-web, omd-api (everything except /metrics)
+#   omd-api        -> postgres, redis
+#   omd-migrate    -> postgres
+#   omd-forecast   -> postgres (daily CronJob; egress to NSE + Bedrock via ServiceEntries)
+# Kubelet probes are rewritten by the sidecar to :15020, so they are not affected.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+spec: {}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-gateway-to-web
+spec:
+  selector:
+    matchLabels: {app: omd-web}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"]
+      to:
+        - operation: {methods: ["GET", "HEAD"]}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-gateway-to-api
+spec:
+  selector:
+    matchLabels: {app: omd-api}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"]
+      to:
+        - operation:
+            notPaths: ["/metrics"]         # path as the API sees it (after the /api rewrite); metrics stay internal
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-api-to-redis
+spec:
+  selector:
+    matchLabels: {app: redis}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/omd/sa/omd-api"]
+      to:
+        - operation: {ports: ["6379"]}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-to-postgres
+spec:
+  selector:
+    matchLabels: {app: postgres}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/omd/sa/omd-api"
+              - "cluster.local/ns/omd/sa/omd-migrate"
+              - "cluster.local/ns/omd/sa/omd-forecast"
+      to:
+        - operation: {ports: ["5432"]}

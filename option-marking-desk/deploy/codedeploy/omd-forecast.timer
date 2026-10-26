@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the IV forecast after NSE publishes the F&O bhavcopy
+
+[Timer]
+# NSE usually publishes the F&O bhavcopy in the evening; the later run picks up late files.
+# A re-run with no new data is skipped without calling Claude.
+OnCalendar=Mon..Fri *-*-* 20:15:00 Asia/Kolkata
+OnCalendar=Mon..Fri *-*-* 22:30:00 Asia/Kolkata
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target

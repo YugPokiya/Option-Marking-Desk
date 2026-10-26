@@ -1,0 +1,48 @@
+# Install with:  istioctl install -f istio/istio-operator.yaml -y
+# Pinned to Istio 1.31.3 (current release, Oct 2026). Needs Kubernetes 1.29+ for native sidecars.
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: omd-istio
+  namespace: istio-system
+spec:
+  profile: default                 # istiod + istio-ingressgateway
+  meshConfig:
+    accessLogFile: /dev/stdout
+    accessLogEncoding: JSON
+    enableTracing: false
+    outboundTrafficPolicy:
+      mode: REGISTRY_ONLY          # egress only to services/ServiceEntries the mesh knows about
+    defaultConfig:
+      holdApplicationUntilProxyStarts: true
+      proxyMetadata:
+        ISTIO_META_DNS_CAPTURE: "true"        # sidecar answers DNS, so the auto-allocated VIPs resolve
+  values:
+    pilot:
+      env:
+        ENABLE_NATIVE_SIDECARS: "true"   # sidecar as an init container: Jobs exit cleanly, no startup races
+        PILOT_ENABLE_IP_AUTOALLOCATE: "true"   # gives address-less TCP ServiceEntries (managed Postgres) a VIP
+    global:
+      proxy:
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {memory: 256Mi}
+  components:
+    pilot:
+      k8s:
+        resources:
+          requests: {cpu: 200m, memory: 256Mi}
+    ingressGateways:
+      - name: istio-ingressgateway
+        enabled: true
+        k8s:
+          service:
+            type: LoadBalancer
+          serviceAnnotations:
+            service.beta.kubernetes.io/do-loadbalancer-name: omd-ingress
+            service.beta.kubernetes.io/do-loadbalancer-size-unit: "1"
+          hpaSpec:
+            minReplicas: 2
+            maxReplicas: 4
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}

@@ -1,0 +1,389 @@
+# Option Marking Desk: test -> scan -> build -> deploy (CodeDeploy on EC2, or EKS)
+#
+#  lint + unit ─┐
+#               ├─> SonarQube (quality gate) ─┐
+#  integration ─┤                             ├─> deploy-ec2  (default: CodeDeploy -> t3.micro ASG)
+#   (PG+Redis)  └─> image build + Trivy ──────┤   deploy-eks  (when vars.DEPLOY_TARGET == 'eks')
+#  Trivy fs scan (deps, secrets, IaC) ────────┘   main only, "production" environment
+#
+# Repo secrets:   SONAR_TOKEN, SONAR_HOST_URL
+#                 OMD_SECRETS_ENV (EKS only: contents of secrets.env)
+# Repo variables: AWS_ROLE_ARN, ECR_REGISTRY                  (terraform output / github-oidc.sh)
+#                 CODEDEPLOY_BUCKET, CODEDEPLOY_APP, CODEDEPLOY_GROUP   (terraform output, EC2 only)
+#                 DEPLOY_TARGET = ec2 (default) | eks
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  AWS_REGION: ap-south-1
+  EKS_CLUSTER: omd
+
+jobs:
+  lint-unit:
+    name: Lint + unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Ruff
+        run: |
+          ruff check app tests --output-format=github
+          ruff format --check app tests
+      - name: Unit tests
+        run: >
+          pytest tests/unit -m "not integration"
+          --cov=app --cov-report=xml:coverage-unit.xml --cov-report=term
+          --junitxml=junit-unit.xml
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reports-unit
+          path: |
+            coverage-unit.xml
+            junit-unit.xml
+
+  integration:
+    name: Integration tests (Postgres + Redis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine          # same major as the cluster
+        env:
+          POSTGRES_USER: omd
+          POSTGRES_PASSWORD: omd
+          POSTGRES_DB: omd_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U omd -d omd_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+asyncpg://omd:omd@localhost:5432/omd_test
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Migrations apply cleanly, roll back, and match the models
+        run: |
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade head
+          alembic check
+      - name: Integration tests
+        run: >
+          pytest tests/integration -m integration
+          --cov=app --cov-report=xml:coverage-integration.xml --cov-report=term
+          --junitxml=junit-integration.xml
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reports-integration
+          path: |
+            coverage-integration.xml
+            junit-integration.xml
+
+  web:
+    name: Web (typecheck, test, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  sonarqube:
+    name: SonarQube scan + quality gate
+    needs: [lint-unit, integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+    steps:
+      - name: Require SonarQube on main
+        if: env.SONAR_TOKEN == '' && github.ref == 'refs/heads/main'
+        run: |
+          echo "::error::SONAR_TOKEN / SONAR_HOST_URL secrets are not set"
+          exit 1
+      - name: Note skipped scan (fork PRs get no secrets)
+        if: env.SONAR_TOKEN == '' && github.ref != 'refs/heads/main'
+        run: echo "::warning::No SONAR_TOKEN available; SonarQube scan skipped"
+      - uses: actions/checkout@v7
+        if: env.SONAR_TOKEN != ''
+        with:
+          fetch-depth: 0                  # full history: blame + new-code detection
+      - uses: actions/download-artifact@v8
+        if: env.SONAR_TOKEN != ''
+        with:
+          pattern: reports-*
+          merge-multiple: true
+      - name: SonarQube scan
+        if: env.SONAR_TOKEN != ''
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
+        # fails the job if the quality gate fails (vulnerabilities, hotspots, coverage on new code)
+
+  trivy-fs:
+    name: Trivy (dependencies, secrets, IaC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Scan repo (report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          format: sarif
+          output: trivy-fs.sarif
+          severity: MEDIUM,HIGH,CRITICAL
+        env:
+          TRIVY_IGNOREFILE: .trivyignore.yaml
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        continue-on-error: true          # needs code scanning enabled (free on public repos)
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+      - name: Gate on HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-setup-trivy: true
+        env:
+          TRIVY_IGNOREFILE: .trivyignore.yaml   # path-scoped, justified exceptions
+
+  image:
+    name: Build + scan image (${{ matrix.component }})
+    needs: [lint-unit, integration, web]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write                    # OIDC to AWS (push on main only)
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [api, web]
+    env:
+      IMAGE: omd-${{ matrix.component }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/docker/${{ matrix.component }}.Dockerfile
+          tags: ${{ env.IMAGE }}
+          load: true
+          push: false
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+      - name: Trivy image scan (report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          format: sarif
+          output: trivy-${{ matrix.component }}.sarif
+          severity: MEDIUM,HIGH,CRITICAL
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: trivy-${{ matrix.component }}.sarif
+          category: trivy-image-${{ matrix.component }}
+      - name: Gate on HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-setup-trivy: true
+      # --- main only: push the exact image that was scanned ---
+      - name: AWS credentials (OIDC)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: ECR login
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+      - name: Push to ECR
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          TARGET="${{ vars.ECR_REGISTRY }}/omd-${{ matrix.component }}:${{ github.sha }}"
+          docker tag "$IMAGE" "$TARGET"
+          docker push "$TARGET"
+
+  deploy-ec2:
+    name: Deploy to EC2 (CodeDeploy)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.DEPLOY_TARGET != 'eks'
+    needs: [sonarqube, trivy-fs, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      BUNDLE_KEY: omd/${{ github.sha }}.zip
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Build revision bundle
+        run: |
+          cd deploy/codedeploy
+          cat > release.env <<ENV
+          ECR_REGISTRY=${{ vars.ECR_REGISTRY }}
+          IMAGE_TAG=${{ github.sha }}
+          AWS_REGION=${{ env.AWS_REGION }}
+          PARAM_PATH=/omd/prod
+          LOG_GROUP=/omd/prod/app
+          ENV
+          zip -qr "$RUNNER_TEMP/bundle.zip" .
+          unzip -l "$RUNNER_TEMP/bundle.zip"
+      - name: Upload to S3
+        run: aws s3 cp "$RUNNER_TEMP/bundle.zip" "s3://${{ vars.CODEDEPLOY_BUCKET }}/$BUNDLE_KEY"
+      - name: Create deployment
+        id: deploy
+        run: |
+          ID=$(aws deploy create-deployment \
+            --application-name "${{ vars.CODEDEPLOY_APP }}" \
+            --deployment-group-name "${{ vars.CODEDEPLOY_GROUP }}" \
+            --s3-location "bucket=${{ vars.CODEDEPLOY_BUCKET }},key=$BUNDLE_KEY,bundleType=zip" \
+            --description "commit ${{ github.sha }} (run ${{ github.run_number }})" \
+            --query deploymentId --output text)
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "CodeDeploy deployment: $ID"
+      - name: Wait (rolls back automatically on failure or 5xx alarm)
+        run: aws deploy wait deployment-successful --deployment-id "${{ steps.deploy.outputs.id }}"
+      - name: Show failure details
+        if: failure() && steps.deploy.outputs.id != ''
+        run: |
+          aws deploy get-deployment --deployment-id "${{ steps.deploy.outputs.id }}" \
+            --query 'deploymentInfo.{status:status,error:errorInformation,rollback:rollbackInfo}'
+          # shellcheck disable=SC2016  # backticks are JMESPath literals for --query, not shell
+          for i in $(aws deploy list-deployment-targets --deployment-id "${{ steps.deploy.outputs.id }}" --query 'targetIds[]' --output text); do
+            aws deploy get-deployment-target --deployment-id "${{ steps.deploy.outputs.id }}" --target-id "$i" \
+              --query 'deploymentTarget.instanceTarget.lifecycleEvents[?status==`Failed`].[lifecycleEventName,diagnostics.message,diagnostics.logTail]' --output text
+          done
+
+  deploy-eks:
+    name: Deploy to EKS
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.DEPLOY_TARGET == 'eks'
+    needs: [sonarqube, trivy-fs, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production                   # add required reviewers here for a manual approval
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      OVERLAY: deploy/k8s/overlays/aws
+      TAG: ${{ github.sha }}
+      ECR: ${{ vars.ECR_REGISTRY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: kubeconfig
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+      - name: Render secrets + image tags
+        env:
+          OMD_SECRETS_ENV: ${{ secrets.OMD_SECRETS_ENV }}
+        run: |
+          umask 077
+          printf '%s\n' "$OMD_SECRETS_ENV" > "$OVERLAY/secrets.env"
+          sed -i "s|newName: [^,]*/omd-api,|newName: $ECR/omd-api,|; s|newName: [^,]*/omd-web,|newName: $ECR/omd-web,|; s|newTag: [^}]*}|newTag: $TAG}|" "$OVERLAY/kustomization.yaml"
+          kubectl kustomize "$OVERLAY" | grep -E 'image: .*omd-(api|web)'
+      - name: Diff
+        run: kubectl diff -k "$OVERLAY" || true
+      - name: Apply
+        run: kubectl apply -k "$OVERLAY"
+      - name: Migrate
+        run: |
+          JOB=$(sed "s|image: .*omd-api:.*|image: $ECR/omd-api:$TAG|" deploy/k8s/jobs/migrate.yaml | kubectl create -f - -o name)
+          kubectl -n omd wait --for=condition=complete "$JOB" --timeout=300s || {
+            kubectl -n omd logs "$JOB" -c migrate --tail=200; exit 1; }
+      - name: Roll out
+        run: |
+          kubectl -n omd rollout status deploy/omd-api --timeout=300s
+          kubectl -n omd rollout status deploy/omd-web --timeout=300s
+      - name: Verify
+        run: |
+          # rollout status already waited on readiness, and /readyz checks Postgres + Redis through the mesh
+          kubectl -n omd get deploy,rs,pods -l 'app in (omd-api,omd-web)'
+      - name: Roll back on failure
+        if: failure()
+        run: |
+          kubectl -n omd rollout undo deploy/omd-api || true
+          kubectl -n omd rollout undo deploy/omd-web || true
+          echo "::error::Deploy failed, rolled back to the previous ReplicaSet"

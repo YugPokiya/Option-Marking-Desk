@@ -1,0 +1,20 @@
+# Edge: the shared istio-ingressgateway (a DigitalOcean LoadBalancer) terminates TLS.
+# credentialName refers to a Secret in istio-system, created by cert-manager (k8s/platform).
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: omd-gateway
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port: {number: 80, name: http, protocol: HTTP}
+      hosts: ["omd.example.com"]
+      tls:
+        httpsRedirect: true
+    - port: {number: 443, name: https, protocol: HTTPS}
+      hosts: ["omd.example.com"]
+      tls:
+        mode: SIMPLE
+        credentialName: omd-tls
+        minProtocolVersion: TLSV1_2

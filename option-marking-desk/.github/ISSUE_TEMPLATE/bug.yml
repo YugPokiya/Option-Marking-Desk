@@ -1,0 +1,14 @@
+name: Bug
+description: Something is wrong (a crash, a bad mark, a broken page)
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes: {label: What happened, description: "Include the chain (CSV or chain id) and the run id if it's a marking issue."}
+    validations: {required: true}
+  - type: textarea
+    id: expected
+    attributes: {label: What you expected}
+  - type: input
+    id: version
+    attributes: {label: Commit / image tag}

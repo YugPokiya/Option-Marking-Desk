@@ -1,0 +1,52 @@
+# Daily IV forecast after NSE publishes the bhavcopy. Same image as the API.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: omd-forecast
+  labels: {app: omd-forecast}
+spec:
+  schedule: "15 20 * * 1-5"
+  timeZone: "Asia/Kolkata"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels: {app: omd-forecast}
+          annotations:
+            # EKS Pod Identity agent (link-local) must bypass the sidecar to hand out Bedrock credentials
+            traffic.sidecar.istio.io/excludeOutboundIPRanges: "169.254.170.23/32"
+        spec:
+          serviceAccountName: omd-forecast
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: forecast
+              image: registry.digitalocean.com/omd/omd-api:0.1.0
+              command: ["python", "-m", "app.forecast", "run-daily"]
+              envFrom:
+                - configMapRef: {name: omd-config}
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef: {name: omd-secrets, key: DATABASE_URL}
+              resources:
+                requests: {cpu: 250m, memory: 512Mi}
+                limits: {memory: 1Gi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: ["ALL"]}
+              volumeMounts:
+                - {name: tmp, mountPath: /tmp}
+          volumes:
+            - name: tmp
+              emptyDir: {}
